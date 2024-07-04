@@ -45,3 +45,4 @@ urllib3==2.2.2
 virtualenv==20.26.3
 watchdog==4.0.1
 openpyxl
+xlsxwriter
