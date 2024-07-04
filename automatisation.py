@@ -2,6 +2,13 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
+# S'assurer que openpyxl est installé
+try:
+    import openpyxl
+except ImportError:
+    st.error("Le package 'openpyxl' est requis pour lire les fichiers Excel. Utilisez pip ou conda pour installer 'openpyxl'.")
+    st.stop()
+
 def read_excel_sheets(template_path):
     try:
         sites_adresses = pd.read_excel(template_path, sheet_name='Liste des sites avec adresses')
@@ -12,16 +19,41 @@ def read_excel_sheets(template_path):
         return None, None
 
 def check_duplicates_and_missing_values(sites_adresses, utilisateurs_clients):
+    # Supprimer les doublons exacts
     sites_adresses_no_duplicates = sites_adresses.drop_duplicates()
-    sites_adresses_no_duplicates['is_duplicate'] = sites_adresses_no_duplicates.duplicated(subset=['CGR Chantier'], keep=False)
-    
     utilisateurs_clients_no_duplicates = utilisateurs_clients.drop_duplicates(subset=['Mail'])
-    utilisateurs_clients_no_duplicates['is_duplicate'] = utilisateurs_clients_no_duplicates.duplicated(subset=['Mail'], keep=False)
+
+    duplicated_cgr = sites_adresses_no_duplicates[sites_adresses_no_duplicates.duplicated(subset=['CGR Chantier'], keep=False)]
+    unique_cgr = sites_adresses_no_duplicates.drop_duplicates(subset=['CGR Chantier'], keep=False)
     
+    def are_rows_different(row1, row2):
+        return any(row1[col] != row2[col] for col in row1.index if col != 'CGR Chantier')
+
+    to_keep = []
+    to_remove = []
+    for cgr, group in duplicated_cgr.groupby('CGR Chantier'):
+        first_row = group.iloc[0]
+        if any(are_rows_different(first_row, group.iloc[i]) for i in range(1, len(group))):
+            to_keep.append(group)
+        else:
+            if group['N° Mag. (facultatif)'].nunique() > 1:
+                to_keep.append(group)
+            else:
+                to_keep.append(group.iloc[0:1])
+                to_remove.append(group.iloc[1:])
+
+    if to_keep:
+        sites_adresses_no_duplicates = pd.concat([unique_cgr] + to_keep, ignore_index=True)
+    if to_remove:
+        removed_duplicates = pd.concat(to_remove, ignore_index=True)
+    else:
+        removed_duplicates = pd.DataFrame()
+
+    # Identifier les informations manquantes
     sites_missing_info = sites_adresses_no_duplicates[sites_adresses_no_duplicates.isnull().any(axis=1)]
     utilisateurs_missing_info = utilisateurs_clients_no_duplicates[utilisateurs_clients_no_duplicates.isnull().any(axis=1)]
 
-    return sites_adresses_no_duplicates, utilisateurs_clients_no_duplicates, sites_missing_info, utilisateurs_missing_info
+    return sites_adresses_no_duplicates, utilisateurs_clients_no_duplicates, sites_missing_info, utilisateurs_missing_info, removed_duplicates
 
 def save_to_excel(dataframe, sheet_name):
     output = BytesIO()
@@ -35,12 +67,21 @@ def process_file(template_path):
     if sites_adresses is None or utilisateurs_clients is None:
         return None
     
-    sites_adresses_no_duplicates, utilisateurs_clients_no_duplicates, sites_missing_info, utilisateurs_missing_info = check_duplicates_and_missing_values(sites_adresses, utilisateurs_clients)
+    sites_adresses_no_duplicates, utilisateurs_clients_no_duplicates, sites_missing_info, utilisateurs_missing_info, removed_duplicates = check_duplicates_and_missing_values(sites_adresses, utilisateurs_clients)
+
+    # Débogage pour vérifier les DataFrames
+    print("sites_adresses_no_duplicates:\n", sites_adresses_no_duplicates.head())
+    print("utilisateurs_clients_no_duplicates:\n", utilisateurs_clients_no_duplicates.head())
+
+    if 'is_duplicate' not in sites_adresses_no_duplicates.columns:
+        sites_adresses_no_duplicates['is_duplicate'] = False
+    if 'is_duplicate' not in utilisateurs_clients_no_duplicates.columns:
+        utilisateurs_clients_no_duplicates['is_duplicate'] = False
 
     if sites_adresses_no_duplicates['is_duplicate'].any() or utilisateurs_clients_no_duplicates['is_duplicate'].sum() > 0:
         st.warning("Des doublons ont été trouvés ou des données manquent.")
-        if sites_adresses_no_duplicates['is_duplicate'].any():
-            st.warning("Doublons trouvés dans CGR Chantier")
+        if not removed_duplicates.empty:
+            st.warning("Doublons trouvés dans CGR Chantier, les lignes identiques ont été supprimées.")
         if utilisateurs_clients_no_duplicates['is_duplicate'].sum() > 0:
             st.warning(f"Nombre de doublons de mails: {utilisateurs_clients_no_duplicates['is_duplicate'].sum()}")
         return None
@@ -65,10 +106,10 @@ def create_contacts_dataframe(utilisateurs_clients_no_duplicates):
     creer_contacts['Email'] = utilisateurs_clients_no_duplicates['Mail']
     creer_contacts['Contact_Type__c'] = utilisateurs_clients_no_duplicates['Type (Donneurs d\'ordre ou Site)'].replace(
         {'Site': 'portal user site', 'Donneurs d\'ordre': 'portal user'})
-    creer_contacts['LastName'] = utilisateurs_clients_no_duplicates['Nom']
-    creer_contacts['FirstName'] = utilisateurs_clients_no_duplicates['Prénom']
+    creer_contacts['LastName'] = utilisateurs_clients_no_duplicates['Nom'].astype(str)
+    creer_contacts['FirstName'] = utilisateurs_clients_no_duplicates['Prénom'].astype(str)
     creer_contacts['region'] = utilisateurs_clients_no_duplicates['Périmètre des sites']
-    creer_contacts['ID Contact'] = utilisateurs_clients_no_duplicates['Nom'] + ' ' + utilisateurs_clients_no_duplicates['Prénom']
+    creer_contacts['ID Contact'] = creer_contacts['LastName'] + ' ' + creer_contacts['FirstName']
     creer_contacts['CGR Chantier'] = utilisateurs_clients_no_duplicates.get('CGR Chantier', None)
     creer_contacts['Site__c'] = None
     creer_contacts['AccountId'] = None
